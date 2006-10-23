@@ -10,3 +10,4 @@ t/boilerplate.t
 t/pod-coverage.t
 t/pod.t
 Makefile.PL
+SIGNATURE    Added here by Module::Build

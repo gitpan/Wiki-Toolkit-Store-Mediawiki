@@ -6,6 +6,7 @@ my $builder = Module::Build->new(
     module_name         => 'Wiki::Toolkit::Store::Mediawiki',
     license             => 'perl',
     dist_author         => 'Derek Price <derek@ximbiot.com>',
+    sign		=> 1,
     dist_version_from   => 'lib/Wiki/Toolkit/Store/Mediawiki.pm',
     requires => {
 	'Wiki::Toolkit::Store::Database' => 0,

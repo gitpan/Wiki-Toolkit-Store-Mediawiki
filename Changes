@@ -1,5 +1,12 @@
 Revision history for Wiki-Toolkit-Store-Mediawiki
 
+0.04    October 23, 2006
+	- Accept user tokens and email tokens in lieu of a password.
+	- An update_user function has been added.
+	- validate_user has been replaced with get_user_info.
+	- Handle email tokens and timestamps for new users.
+	- Provide a method to retrieve interwiki URLs.
+
 0.03    September 20, 2006
 	- Rename from CGI-Wiki-Store-Mediawiki.
 	- Doc tweaks.

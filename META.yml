@@ -1,10 +1,10 @@
 ---
 name: Wiki-Toolkit-Store-Mediawiki
 version: !!perl/hash:Module::Build::Version
-  original: 0.03
+  original: 0.04
   version:
     - 0
-    - 30
+    - 40
 author:
   - 'Derek Price <derek@ximbiot.com>'
 abstract: |-
@@ -23,7 +23,7 @@ build_requires:
 provides:
   Wiki::Toolkit::Store::Mediawiki:
     file: lib/Wiki/Toolkit/Store/Mediawiki.pm
-    version: 0.03
+    version: 0.04
 generated_by: Module::Build version 0.2804
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.2.html

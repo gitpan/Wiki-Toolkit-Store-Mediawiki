@@ -3,14 +3,13 @@ package Wiki::Toolkit::Store::Mediawiki;
 use warnings;
 use strict;
 
-use vars qw(@ISA);
-
 use Wiki::Toolkit::Store::Database;
+use base qw(Wiki::Toolkit::Store::Database);
+
 use Carp qw/carp croak confess/;
+use Digest::MD5 qw(md5_hex);
 use Time::Piece::Adaptive;
 use Time::Seconds;
-
-@ISA = qw(Wiki::Toolkit::Store::Database);
 
 
 
@@ -21,11 +20,11 @@ Wiki::Toolkit
 
 =head1 VERSION
 
-Version 0.03
+Version 0.04
 
 =cut
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 =head1 REQUIRES
 
@@ -193,7 +192,7 @@ sub __namespace_to_num
 {
     my ($self, $name) = @_;
     $name =~ s/ /_/g if $self->{convert_spaces};
-    return 0, $name unless $name =~ /^([^:]+):(.*)$/;
+    return 0, $name unless $name =~ /^(?::+)?([^:]+):+([^:].*)$/;
     return -2, $2 if $1 eq 'Media';
     return -1, $2 if $1 eq 'Special';
     return 4, $2 if $1 eq $self->{wikiname};
@@ -1085,7 +1084,6 @@ sub write_node_post_locking
     {
 	my $en = ($self->charset_encode ($link))[0];
 	my ($s, $n) = $self->__namespace_to_num ($en);
-	print STDERR "link=$link;en=$en;s=$s;n=$n\n";
 
 	$st1->execute ($s, $n);
 	$st2->execute ($s, $n);
@@ -1271,29 +1269,77 @@ sub list_dangling_links_w_count
 
 
 
-=head2 validate_user
+=head2 get_user_info
 
-  my $username = $store->validate_user ($username, $password, %other_args);
+  my ($username, $email_validated)
+	= $store->get_user_info (name => $username,
+				 password => $password,
+				 fields => [name, email_authenticated,
+					    token],
+				 %other_args);
 
-Given a username and a password, return the username if it exists and password
-is correct, or undef, otherwise.
+Given a user name, return the requested fields if the user exists and undef,
+otherwise.  Given a password or a token, undef is also returned if the
+specified password or token is incorrect.
 
-The returned username may be different from the one passed in when
+The list of fields to return defaults to C<name>, C<email_authenticated>,
+& C<token>.
+
+The returned user name may be different from the one passed in when
 $args{ignore_case} is set.
 
 =cut
 
-use Digest::MD5 qw(md5_hex);
-sub validate_user
+sub get_user_info
 {
-    my ($self, $username, $password, %args) = @_;
+    my ($self, %args) = @_;
     my $dbh = $self->{_dbh};
-    
-    my $sql = "SELECT user_id, user_password, user_name FROM user"
-	       . " WHERE "
-	       . $self->_get_cmp_sql ("user_name",
-				      $self->charset_encode ($username),
-				      $args{ignore_case});
+
+    my ($where, $count);
+    for my $key (qw{name id email})
+    {
+	if ($args{$key})
+	{
+	    $count++;
+	    $where = $args{id}
+		     ? "user_id = " . $args{id}
+		     : $self->_get_cmp_sql ("user_$key",
+					    $self->charset_encode ($args{$key}),
+					    $args{email}
+					    ? 1 : $args{ignore_case});
+	}
+    }
+    croak "Must supply one and only one of `name', `id', or `email'"
+	unless $count == 1;
+
+    $count = 0;
+    for my $key (qw{password token email_token})
+    {
+	$count++ if $args{$key};
+    }
+    croak "Must supply only one of `password', `token', or `email_token'"
+	if $count > 1;
+
+    my @fields = map {"user_$_"}
+		     ($args{fields} ? @{$args{fields}}
+				    : qw(name email_authenticated token));
+
+    if ($args{password})
+    {
+	push @fields, qw(user_id user_password);
+    }
+    elsif ($args{token})
+    {
+	push @fields, qw(user_token);
+    }
+    elsif ($args{email_token})
+    {
+	push @fields, qw(user_id user_email_token user_email_token_expires);
+    }
+
+    my $sql = "SELECT " . join (", ", @fields)
+	      . " FROM user"
+	      . " WHERE $where";
 
     print STDERR "executing $sql\n"; # if $self->{debug};
     my $userinfo = $dbh->selectall_arrayref ($sql)
@@ -1301,16 +1347,48 @@ sub validate_user
 
     # Check that one and only one user was found.
     return undef unless @$userinfo;  # failed login
-    die "multiple users found matching `$username'"
+    die "multiple users found matching `$args{name}'"
 	unless @$userinfo == 1;      # Corrupt database.
-
-    # Check the password.
     $userinfo = $userinfo->[0];
-    my $ep = md5_hex ($userinfo->[0] . "-" . md5_hex ($password));
-    return undef unless $ep eq $userinfo->[1];
 
-    # Return the real username, in case case is being ignored.
-    return $userinfo->[2];
+    if ($args{password})
+    {
+	# Check the password.
+	my ($uid, $password);
+	$password = pop @$userinfo;
+	$uid = pop @$userinfo;
+
+	my $ep = md5_hex ($uid . "-" . md5_hex ($args{password}));
+	return undef unless $ep eq $password;
+    }
+    elsif ($args{token})
+    {
+	# Check the token.
+	my $token = pop @$userinfo;
+	return undef unless $args{token} eq $token;
+    }
+    elsif ($args{email_token})
+    {
+	# Check the token.
+	my ($uid, $expires, $token);
+	$expires = $self->_make_date (pop @$userinfo);
+	$token = pop @$userinfo;
+	$uid = pop @$userinfo;
+	my $now = gmtime;
+
+	return undef unless $args{email_token} eq $token
+			    && $now < $expires;
+
+	$self->update_user (id => $uid, email_authenticated => $now);
+    }
+
+    # The remaining fields were requested.
+    for (my $i = 0; $i < @fields; $i++)
+    {
+      $userinfo->[$i] = $self->_make_date ($userinfo->[$i])
+	if defined $userinfo->[$i] && $fields[$i] =~ /_(?:touched|expires)$/;
+    }
+    return @$userinfo;
 }
 
 
@@ -1326,13 +1404,108 @@ Returns a potentially empty list of error messages.
 
 =cut
 
+# Internal function to create and update users.
+#
+# This function makes some assumptions enforced by its callers.  Don't use it
+# directly.
+sub _update_user
+{
+    my ($self, %args) = @_;
+
+    my $dbh = $self->{_dbh};
+
+    # Fields to update/insert.
+    my (@fields, @values);
+
+    # For the timestamp, and perhaps email_token_expires.
+    my $now = gmtime;
+    $args{touched} = $now;
+
+    $args{email_token_expires} = $now + $args{email_token_expires}
+      if exists $args{email_token_expires}
+	 && !(ref $args{email_token_expires}
+	      && $args{email_token_expires}->isa ('Time::Piece'));
+
+    my @infields = qw(real_name email email_token email_token_expires
+		      email_authenticated token touched password);
+    push @infields, "name" if $args{create};
+    for my $field (@infields)
+    {
+	if (exists $args{$field})
+	{
+	    push @fields, "user_$field";
+	    $args{$field}->set_stringify ($timestamp_fmt)
+		if ref $args{$field}
+		   && $args{$field}->isa ('Time::Piece::Adaptive');
+	    push @values, $dbh->quote ($self->charset_encode ($args{$field}));
+	}
+    }
+
+    # touched and name are always included.
+    croak "Must include at least one field for update"
+	unless @fields > ($args{create} ? 2 : 1);
+
+    my $uid;
+    my $sql;
+    if ($args{create})
+    {
+	$sql = "INSERT INTO user (" . join (", ", @fields)
+	       . ") VALUES (" . join (", ", @values) . ")";
+    }
+    else
+    {
+	my %qa;
+	if ($args{id})
+	{
+	    $qa{id} = $args{id};
+	}
+	else
+	{
+	    $qa{name} = $args{name};
+	}
+	($uid) = $self->get_user_info (%qa, fields => ["id"]);
+
+	# Check that one and only one existing user was found.
+	return "No such user, `" . $args{name} . "'."
+	    unless $uid;
+
+	$sql = "UPDATE user SET "
+	       . join (", ", map ({"$fields[$_] = $values[$_]"} (0..$#fields)))
+	       . " WHERE "
+	       . "user_id = " . $uid;
+    }
+
+    print STDERR "executing $sql\n"; # if $self->{debug};
+    $dbh->do ($sql) or croak "Error updating database: " . $dbh->errstr;
+
+    if ($args{create})
+    {
+	# Get the new user ID and update the password.
+	$uid = $dbh->last_insert_id (undef, undef, undef, undef)
+	    or croak "Error retrieving last insert id: " . $dbh->errstr;
+    }
+
+    if ($args{password})
+    {
+	# Encode the password.
+	my $ep = md5_hex ($uid . "-" . md5_hex ($args{password}));
+
+	# Update the password.
+	$sql = "UPDATE user SET user_password = " . $dbh->quote ($ep)
+	       . " WHERE user_id = $uid";
+	print STDERR "executing $sql\n"; # if $self->{debug};
+	$dbh->do ($sql) or croak "Error updating database: " . $dbh->errstr;
+    }
+
+    return;
+}
+
 sub create_new_user
 {
     my ($self, %args) = @_;
-    my @errors;
 
-    croak "name & password are required arguments"
-	unless $args{name} && $args{password};
+    croak "name is a required argument" unless $args{name};
+    croak "password is a required argument" unless $args{password};
 
     my $dbh = $self->{_dbh};
 
@@ -1346,42 +1519,30 @@ sub create_new_user
     my $userinfo = $dbh->selectall_arrayref ($sql)
 	or croak "Error retrieving user info: " . $dbh->errstr;
 
-    # Check that one and only one user was found.
-    if (@$userinfo)
-    {
-	push @errors, "User `" . $userinfo->[0]->[0] . "' already exists.";
-	return @errors;
-    }
+    # Check no existing user was found.
+    return "User `" . $userinfo->[0]->[0] . "' already exists."
+	if @$userinfo;
 
-    # Insert the new entry.
-    my (@fields, @values);
-    for my $field (qw{name real_name email})
-    {
-	if (exists $args{$field})
-	{
-	    push @fields, "user_$field";
-	    push @values, $dbh->quote ($self->charset_encode ($args{$field}));
-	}
-    }
-    $sql = "INSERT INTO user (" . join (", ", @fields)
-	   . ") VALUES (" . join (", ", @values) . ")";
-    print STDERR "executing $sql\n"; # if $self->{debug};
-    $dbh->do ($sql) or croak "Error updating database: " . $dbh->errstr;
+    return $self->_update_user (%args, create => 1);
+}
 
-    # Get the new user ID and update the password.
-    my $new_uid = $dbh->last_insert_id (undef, undef, undef, undef)
-	or croak "Error retrieving last insert id: " . $dbh->errstr;
 
-    # Encode the password.
-    my $ep = md5_hex ($new_uid . "-" . md5_hex ($args{password}));
 
-    # Update the password.
-    $sql = "UPDATE user SET user_password = " . $dbh->quote ($ep)
-	   . " WHERE user_id = $new_uid";
-    print STDERR "executing $sql\n"; # if $self->{debug};
-    $dbh->do ($sql) or croak "Error updating database: " . $dbh->errstr;
+=head2 update_user
 
-    return @errors;
+Like C<create_user>, except only either C<name> or C<id>, and one field to
+update, are required arguments.
+
+=cut
+
+sub update_user
+{
+    my ($self, %args) = @_;
+
+    croak "One, and only one, of `name' and `id', are required arguments."
+	unless !($args{name} && $args{id}) && ($args{name} || $args{id});
+
+    return $self->_update_user (%args);
 }
 
 
@@ -1396,6 +1557,44 @@ Overrides the parent function of the same name.  At the moment it only returns
 sub schema_current
 {
     return (0, 0);
+}
+
+=head2 get_interwiki_url
+
+  $url = $store->get_interwiki_url ($wikilink);
+
+Converts an interwiki link (like C<Wikipedia:Perl>) to a URL (in this example,
+something like C<http://en.wikipedia.org/wiki/Perl>), or returns undef if
+C<$wikilink> does not appear to refer to a known wiki.  This match is always
+case insensitive because users are often careless.
+
+=cut
+
+# Hrm.  It seems silly to make these errors fatal.  Perhaps it should be a
+# configuration option.
+sub get_interwiki_url
+{
+    my ($self, $wl) = @_;
+    my $dbh = $self->{_dbh};
+
+    my ($prefix, $suffix) = ($wl =~ /^([^:]*):+([^:].*)$/);
+    return unless $prefix;
+
+    my $sql = "SELECT iw_url FROM interwiki"
+	       . " WHERE "
+	       . $self->_get_cmp_sql ("iw_prefix",
+				      $self->charset_encode ($prefix), 1);
+    print STDERR "executing $sql\n"; # if $self->{debug};
+    my $rows = $dbh->selectall_arrayref ($sql)
+	or croak "Error retrieving interwiki info: " . $dbh->errstr;
+
+    print STDERR "Multiple interwiki entries found for `$prefix'."
+	if @$rows > 1;
+    return unless @$rows == 1;
+
+    my $url = $rows->[0][0];
+    $url =~ s/\$1/$suffix/;
+    return $url;
 }
 
 
