@@ -1,5 +1,10 @@
 Revision history for Wiki-Toolkit-Store-Mediawiki
 
+0.05	October 10, 2007
+	- Optimize string matches.
+	- Optimize recentchanges query.
+	- Insert users into user_rights table on user creation.
+
 0.04    October 23, 2006
 	- Accept user tokens and email tokens in lieu of a password.
 	- An update_user function has been added.

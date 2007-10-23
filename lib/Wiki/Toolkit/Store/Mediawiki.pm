@@ -8,7 +8,7 @@ use base qw(Wiki::Toolkit::Store::Database);
 
 use Carp qw/carp croak confess/;
 use Digest::MD5 qw(md5_hex);
-use Time::Piece::Adaptive;
+use Time::Piece::Adaptive qw(:override);
 use Time::Seconds;
 
 
@@ -20,11 +20,11 @@ Wiki::Toolkit
 
 =head1 VERSION
 
-Version 0.04
+Version 0.05
 
 =cut
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 =head1 REQUIRES
 
@@ -144,9 +144,7 @@ sub new {
 
     if (exists $args{ignore_case}) {
 	$self->{ignore_case} = $args{ignore_case};
-    } else {
-	$self->{ignore_case} = 1;
-    }
+    } 
 
     # Call the parent initializer.
     return $self->_init (%args);
@@ -217,7 +215,7 @@ sub __num_to_namespace
     return "Special:$name" if $num == -1;
     return $self->{wikiname} . ":$name" if $num == 4;
     die "no such namespace $num"
-	unless $num > 0 && $num < @namespaces;
+	unless $num > 0 && $num <= @namespaces;
     return "$namespaces[$num - 1]:$name";
 }
 
@@ -315,7 +313,6 @@ sub _retrieve_node_data
     }
     my @results = $self->charset_decode ($dbh->selectrow_array ($sql));
     return @results ? $results[0] : "" unless wantarray;
-#    @results = ("", 0, "") unless @results;
     @data{@outfields} = @results;
     if ($args{version} || $ignore_case)
     {
@@ -446,6 +443,7 @@ sub _get_metadata_sql
     my $sql;
 
     my $cmp;
+
     if ($is)
     {
 	$cmp = "=";
@@ -460,8 +458,15 @@ sub _get_metadata_sql
 	if ($key eq "edit_type")
 	{
 	    if ($metadata->{$key} eq "Minor tidying")
-	    {
-		$sql .= " AND " . $table_prefix . "minor_edit $cmp 1"
+	    {   
+		if ($table_prefix eq "rc_")
+		{
+		    $sql .= " AND rc_minor $cmp 1"
+		}
+		elsif ($table_prefix eq "cur_")
+		{
+    	            $sql .= " AND " . $table_prefix . "minor_edit $cmp 1"
+		}
 	    }
 	    elsif ($metadata->{$key} eq "Normal edit")
 	    {
@@ -481,7 +486,10 @@ sub _get_metadata_sql
 	}
 	elsif ($key eq "patrolled")
 	{
-	    $sql .= " AND rc_patrolled $cmp " . $metadata->{$key};
+	    if($table_prefix eq "rc_")
+	    {
+	        $sql .= " AND rc_patrolled $cmp " . $metadata->{$key};
+	    }
 	}
 	else
 	{
@@ -512,7 +520,7 @@ sub _get_lim_off_sql
 	$args{limit} = 18446744073709551615 unless defined $args{limit};
     }
 
-    return (defined $args{limit} ? "LIMIT $args{limit}" : "")
+    return (defined $args{limit} ? " LIMIT $args{limit}" : "")
 	   . ($args{offset} ? " OFFSET $args{offset}" : "");
 }
 
@@ -550,43 +558,123 @@ sub _find_recent_changes_by_criteria
     # It seems to me like it would be easier to just accept two metadata
     # arguments and let include_all_changes switch tables, but I am
     # implementing this anyway for backwards compatibility.
-    if ($include_all_changes || (!($metadata_is || $metadata_isnt)
-				 && ($metadata_was || $metadata_wasnt)))
+    $include_all_changes = 1
+    	if !($metadata_is || $metadata_isnt)
+	   && ($metadata_was || $metadata_wasnt);
+
+    my ($s, $f);
+
+    if ($args{between_secs})
     {
-	$include_all_changes = 1;
-	$tables = "text LEFT JOIN recentchanges ON rc_this_oldid = old_id";
-	$table_prefix = "old_";
-	$metadata_is = $metadata_was unless $metadata_is;
-	$metadata_isnt = $metadata_wasnt unless $metadata_isnt;
-    }
-    else
-    {
-	$tables = "cur INNER JOIN page ON page_namespace = cur_namespace"
-		. " AND page_title = cur_title"
-		. " LEFT JOIN recentchanges ON rc_this_oldid = page_latest";
-	$table_prefix = "cur_";
+	# This function assumes that it was called via recent_changes, which
+	# sorts the @{$args{between_secs}} array.
+	($s, $f) = map {defined $_ ? ($_->strftime ($timestamp_fmt)) : $_}
+		       @{$args{between_secs}};
     }
 
+    $metadata_is = $metadata_was unless $metadata_is;
+    $metadata_isnt = $metadata_wasnt unless $metadata_isnt;
 
-    if (wantarray)
+    # Set useOld;
+    my $useOld = 0;
+    if (!wantarray)
+    {
+	# Always retrieve the record count from the old tables since the
+	# recentchanges count will only count the changes in the last month.
+	$useOld = 1;
+    }
+    elsif ($s)
+    {
+	# If we have a start time and it goes back less than a month, then
+	# we know that all the required records will be in recentchanges.
+	my $now = gmtime->epoch;
+	$useOld = 1 if ($now - $s)/(3600*24*30) > 1;
+    }
+    else # !s
+    {
+	my ($rows, $rcCount, $sql);
+
+	if ($include_all_changes)
+	{
+	    $sql = "SELECT COUNT(*) FROM recentchanges";
+	}  
+	else # !include_all_changes
+	{
+	    $sql = "SELECT COUNT(DISTINCT(rc_title)) FROM recentchanges";
+	}
+	$sql .= " WHERE 1 = 1";
+	$sql .= $self->_get_metadata_sql (1, "rc_", $metadata_is,
+					  %args)
+	    if $metadata_is;
+	$sql .= $self->_get_metadata_sql (0, "rc_", $metadata_isnt,
+					  %args)
+	    if $metadata_isnt;
+
+	$rows = $dbh->selectall_arrayref ($sql);
+	$rcCount = $rows->[0]->[0];
+	
+	$useOld = 1
+	    if (defined $args{limit} ? $args{limit} : 0)
+	       + (defined $args{offset} ? $args{offset} : 0) > $rcCount;
+    }
+
+    if ($useOld)
     {
 	if ($include_all_changes)
 	{
-	    $infields = "old_id, rc_new, ";
+	    $tables = "text";
+	    $table_prefix = "old_";
 	}
-	else
+	else # useOld && !include_all_changes
+	{
+	    $tables = "cur JOIN page ON cur_id = page_id";
+	    $table_prefix = "cur_";
+	}
+    }
+    else # !useOld (we can get what we want from recentchanges regardless
+	 #          of i_a_c)
+    {   
+	$tables = "recentchanges";
+	$table_prefix = "rc_"; 
+    }
+
+    if (wantarray)
+    {
+	@outfields = qw{version};
+	if($useOld && $include_all_changes)
+	{
+	    $infields = "old_id, ";
+	}
+	elsif($useOld && !$include_all_changes)
 	{
 	    $infields = "page_latest, cur_is_new, ";
+	    push @outfields, 'is_new';
+	}
+	else #if ($include_all_changes) #!useOld && include_all_changes
+	{
+	    $infields = "rc_this_oldid, rc_new, ";
+	    push @outfields, 'is_new';
 	}
 
 	$infields .= join ", ", map {$table_prefix . $_}
-				    qw{user_text comment timestamp
-				       minor_edit};
-	@outfields = qw{version is_new username comment last_modified
-			edit_type};
+				    qw{user_text comment timestamp};
 
-	$infields .= ", rc_patrolled";
-	push @outfields, 'patrolled';
+	if ($useOld)
+	{
+	    $infields .= ", " . $table_prefix . "minor_edit";
+	}
+	else
+	{
+	    $infields .= ", rc_minor";
+	}
+
+	push @outfields, qw{username comment last_modified edit_type};
+
+	if(!$useOld)
+	{
+	    $infields .= ", rc_patrolled";
+	    push @outfields, 'patrolled';
+	}
 
 	unless ($args{name} && !$ignore_case)
 	{
@@ -614,27 +702,24 @@ sub _find_recent_changes_by_criteria
 
     if ($args{between_secs})
     {
-	# This function assumes that it was called via recent_changes, which
-	# sorts the @{$args{between_secs}} array.
-	my ($s, $f) = map {defined $_ ? ($_->strftime ($timestamp_fmt)) : $_}
-			  @{$args{between_secs}};
 	$sql .= " AND " . $table_prefix . "timestamp >= $s"
 	     if $s;
 	$sql .= " AND " . $table_prefix . "timestamp <= $f"
 	     if $f;
     }
-
     $sql .= $self->_get_metadata_sql (1, $table_prefix, $metadata_is, %args)
 	if $metadata_is;
     $sql .= $self->_get_metadata_sql (0, $table_prefix, $metadata_isnt, %args)
 	if $metadata_isnt;
-
+    $sql .= " GROUP BY rc_title, rc_namespace "
+	unless $useOld || $include_all_changes;
     $sql .= " ORDER BY " . $table_prefix . "timestamp DESC";
 
     my $limoffsql = _get_lim_off_sql (%args);
-    $sql .= " " . $limoffsql if $limoffsql;
+    $sql .= $limoffsql if $limoffsql;
 
     print STDERR "executing $sql\n"; # if $self->{debug};
+    print STDERR "outfields = ", join (", ",@outfields), "\n";
     my $nodes = $dbh->selectall_arrayref ($sql);
 
     return $nodes->[0]->[0] unless wantarray;
@@ -674,18 +759,19 @@ sub _get_cmp_sql
     $ignore_case = $self->{ignore_case} unless defined $ignore_case;
     my $dbh = $self->{_dbh};
 
-    # The MySQL documentation says that unless one of the strings is declared
-    # BINARY (e.g. "STRCMP ($field, BINARY $name)") then the string comparison
-    # will be case insensitive, but for some reason that isn't working.  If it
-    # was, then that would probably be faster than this:
+    # The MySQL documentation says that comparison using like should default
+    # to a case insensitive comparison, but for some reason this isn't
+    # happening by default.  Force it instead using the COLLATE keyword.  I'm
+    # not exactly sure why this needs Latin1 when the table is stored in UTF8,
+    # but it doesn't work otherwise.
     if ($ignore_case)
     {
-	$field = "LOWER($field)";
-	$name = lc $name;
+	$name =~ s/%/\\%/g;
+	return "$field LIKE " . $dbh->quote($name)
+	       . " COLLATE latin1_general_ci";
     }
 
-    return "NOT STRCMP($field, "
-	   . $dbh->quote ($name) . ")";
+    return "$field = " . $dbh->quote($name);
 }
 
 
@@ -1393,6 +1479,27 @@ sub get_user_info
 
 
 
+=head2 add_to_block_list
+
+  my @errmsgs = $store->add_to_block_list (blockee => $b, expiry => $e,
+                                           reason => $r);
+
+Add new user or ip/netmask to the ipblocks table. 
+
+C<blockee> can be either a username that must exist in the user table, or an ip
+address with an optional ip mask.  C<expiry> the date for when the block 
+expires.  This should be either seconds since the epoch or a 
+L<Time::Piece:Adaptive>.  C<reason> will be the moderators reason for the 
+blocking.  
+
+=cut 
+
+sub add_to_block_list 
+{
+    
+}
+
+
 =head2 create_new_user
 
   my @errmsgs = $store->create_new_user (name => $username, password => $p);
@@ -1483,6 +1590,9 @@ sub _update_user
 	# Get the new user ID and update the password.
 	$uid = $dbh->last_insert_id (undef, undef, undef, undef)
 	    or croak "Error retrieving last insert id: " . $dbh->errstr;
+	$sql = "INSERT INTO user_rights VALUES ($uid, '')";
+	print STDERR "executing $sql\n"; # if $self->{debug};
+	$dbh->do ($sql) or croak "Error updating database: " . $dbh->errstr;
     }
 
     if ($args{password})
