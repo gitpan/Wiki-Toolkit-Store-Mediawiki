@@ -1,6 +1,6 @@
 ---
 name: Wiki-Toolkit-Store-Mediawiki
-version: 0.05
+version: 0.06
 author:
   - 'Derek Price <derek@ximbiot.com>'
 abstract: |-
@@ -19,7 +19,7 @@ build_requires:
 provides:
   Wiki::Toolkit::Store::Mediawiki:
     file: lib/Wiki/Toolkit/Store/Mediawiki.pm
-    version: 0.05
+    version: 0.06
 generated_by: Module::Build version 0.2808
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.2.html

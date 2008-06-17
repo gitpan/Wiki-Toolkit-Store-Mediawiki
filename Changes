@@ -1,5 +1,24 @@
 Revision history for Wiki-Toolkit-Store-Mediawiki
 
+0.06    June 17th, 2008
+	- Implement Mediawiki's patrolled flag via Wiki::Toolkit's
+	  moderate_node API.
+	- Validate version arguments before using as search terms.
+	- Zero and the empty string are no longer considered valid passwords
+	  for all users.
+	- Data from the database is utf8::decoded before being returned.
+	- list_all_nodes allows refinement by metadata.
+	- Metadata refinement may include namespace.
+	- Assume patrolled when searching revision table.
+	- Add delete_page method.
+	- Removed prints to STDERR.  Enable debug tracing via DBI->trace(),
+	  instead.
+	- Join the Revision, Page, and Recentchanges tables correctly.
+	- Don't insert cleartext passwords before inserting the hashed version.
+	  into the database.
+	- Allow fields to be set to NULL when updating user information.
+	- Improve history query when recentchanges does not apply.
+
 0.05	October 10, 2007
 	- Optimize string matches.
 	- Optimize recentchanges query.
@@ -26,4 +45,3 @@ Revision history for Wiki-Toolkit-Store-Mediawiki
 
 0.01    August 15, 2006
         First version, released on an unsuspecting world.
-
